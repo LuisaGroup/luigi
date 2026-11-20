@@ -1,7 +1,7 @@
 import threading
 import unittest
 
-from luigi_loadguard import LoadGuard, Reading, Rule, cpu_busy, gpu_busy, parse_luid
+from luigi_app.platforms.loadguard import LoadGuard, Reading, Rule, cpu_busy, gpu_busy, parse_luid
 
 
 A = "0x00000000_0x0000aaaa"

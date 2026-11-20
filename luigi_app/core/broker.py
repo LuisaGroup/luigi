@@ -5,12 +5,13 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import sys
 import threading
 import uuid
 
-import gpufifo as fifo
-from auth_core import AuthCore, Rejected, _digest
-from hip_policy import DeferredLaunch, workload_environment
+import luigi_app.core.gpufifo as fifo
+from luigi_app.core.auth import AuthCore, Rejected, _digest
+from luigi_app.platforms.hip_policy import DeferredLaunch, workload_environment
 
 MAX_FRAME = 65536
 MAX_LOG_BYTES = 8000
@@ -63,7 +64,7 @@ def memberships(db, job):
 
 
 def queue_rows(db):
-    return [dict(r) for r in db.execute("SELECT name,kind,gpu_uuid FROM named_queues ORDER BY name")]
+    return [dict(r) for r in db.execute("SELECT name,kind,gpu_uuid,gpu_provider FROM named_queues ORDER BY name")]
 
 
 def narrow_job(row, root):
@@ -92,6 +93,10 @@ class Broker:
             db.execute("CREATE TABLE IF NOT EXISTS named_queues ("
                        "name TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('cpu','gpu')), "
                        "gpu_uuid TEXT UNIQUE)")
+            queue_columns = {r[1] for r in db.execute("PRAGMA table_info(named_queues)")}
+            if "gpu_provider" not in queue_columns:
+                db.execute("ALTER TABLE named_queues ADD COLUMN gpu_provider TEXT")
+                db.execute("UPDATE named_queues SET gpu_provider='amd' WHERE gpu_uuid IS NOT NULL")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_unbound_gpu ON named_queues(kind) "
                        "WHERE kind='gpu' AND gpu_uuid IS NULL")
             db.execute("CREATE TABLE IF NOT EXISTS job_queues (job INTEGER NOT NULL REFERENCES jobs(id), "
@@ -284,22 +289,34 @@ class Broker:
                             "SELECT j.status,COUNT(*) FROM jobs j JOIN job_queues m ON j.id=m.job "
                             "WHERE m.name=? GROUP BY j.status", (q["name"],)))}
                         for q in queue_rows(db)]}
-                fields(data, ("lane",), ("kind", "gpu_uuid") if op == "create" else ())
+                fields(data, ("lane",), ("kind", "gpu_uuid", "gpu_provider") if op == "create" else ())
                 name = queue(data["lane"])
                 if op == "create":
                     kind = data.get("kind", name)
                     if kind not in ("cpu", "gpu"):
                         raise ValueError("choose cpu or gpu queue kind")
                     device = data.get("gpu_uuid")
+                    provider = data.get("gpu_provider")
+                    if device is None and provider is not None:
+                        raise ValueError("GPU provider requires a stable GPU UUID")
                     if device is not None:
+                        if getattr(self.policy, "gpu_monitor_disabled", False):
+                            raise ValueError("GPU UUID bindings require enabled monitoring")
                         if kind != "gpu" or not isinstance(device, str):
                             raise ValueError("GPU UUID requires a GPU queue")
+                        provider = provider or ("nvidia" if device.lower().startswith("gpu-") else "amd")
+                        if provider not in ("amd", "nvidia"):
+                            raise ValueError("GPU provider must be amd or nvidia")
+                        if device.lower().startswith("gpu-"):
+                            if provider != "nvidia":
+                                raise ValueError("GPU-prefixed UUID is only valid for NVIDIA")
+                            device = device[4:]
                         device = str(uuid.UUID(device))
                         if device == str(uuid.UUID(int=0)):
                             raise ValueError("nil GPU UUID")
-                    existing = db.execute("SELECT kind,gpu_uuid FROM named_queues WHERE name=?", (name,)).fetchone()
+                    existing = db.execute("SELECT kind,gpu_uuid,gpu_provider FROM named_queues WHERE name=?", (name,)).fetchone()
                     if existing is not None:
-                        if tuple(existing) != (kind, device):
+                        if tuple(existing) != (kind, device, provider):
                             raise ValueError("existing queue has a different configuration")
                         return {"created": False, "name": name}
                     if db.execute("SELECT count(*) FROM named_queues").fetchone()[0] >= 32:
@@ -308,7 +325,7 @@ class Broker:
                         "SELECT 1 FROM named_queues WHERE kind='gpu' AND (gpu_uuid IS NULL OR ? IS NULL)",
                         (device,)).fetchone():
                         raise ValueError("an unbound GPU queue cannot coexist with other GPU queues")
-                    db.execute("INSERT INTO named_queues VALUES(?,?,?)", (name, kind, device))
+                    db.execute("INSERT INTO named_queues(name,kind,gpu_uuid,gpu_provider) VALUES(?,?,?,?)", (name, kind, device, provider))
                     return {"created": True, "name": name}
                 if not db.execute("SELECT 1 FROM named_queues WHERE name=?", (name,)).fetchone():
                     raise ValueError("queue has not been created")
@@ -369,8 +386,8 @@ class Broker:
                 if op == "kill":
                     if row["status"] != "running":
                         raise ValueError("only a running job can be killed")
-                    if os.name != "nt":
-                        raise ValueError("job tree termination requires Windows")
+                    if os.name != "nt" and sys.platform != "linux":
+                        raise ValueError("job tree termination is unavailable on this platform")
                     db.execute("UPDATE jobs SET kill_requested=1 WHERE id=?", (row["id"],))
                     return {"requested": True}
                 if op == "cancel":
@@ -486,7 +503,7 @@ def dispatcher(broker, stop, prelaunch, execute=None):
             except (OSError, ValueError):
                 fifo.finish(broker.root, row["id"], "launch_failed", note="pinned HIP workload validation failed")
                 return
-            fifo.run_job(broker.root, row, base_env=env, validate_paths=True)
+            fifo.run_job(broker.root, row, base_env=env, validate_paths=True, stop_requested=stop.is_set)
 
     def run(row):
         try:

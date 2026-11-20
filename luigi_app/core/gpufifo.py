@@ -286,7 +286,70 @@ def copy_task_records(root, dest):
                 shutil.copy2(p, copied / name)
 
 
-def run_job(root, row, *, base_env=None, validate_paths=False):
+def _run_linux_job(root, row, argv, options, stop_requested):
+    if __name__ == "__main__" and not __package__:
+        # Legacy engine script integration tests can invoke this file.
+        # The isolated Windows _gate path never reaches this Linux import.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from luigi_app.platforms.linux_process import LinuxJob
+
+    job_id = row["id"]
+    # A failed supervisor spawn cannot have started a user program.
+    try:
+        job = LinuxJob(options)
+    except (OSError, ValueError) as exc:
+        finish(root, job_id, "launch_failed", note=str(exc))
+        return
+    limit = row.get("timeout")
+    cutoff = None
+    stopped = None
+    released = False
+    try:
+        while True:
+            for event, *details in job.events():
+                if event == "ready":
+                    with db(root) as conn:
+                        requested = conn.execute(
+                            "SELECT kill_requested FROM jobs WHERE id=?", (job_id,)).fetchone()[0]
+                    if requested or stop_requested():
+                        job.cancel()
+                        finish(root, job_id, "killed", note="stopped before launch")
+                        return
+                    job.send(argv)
+                    released = True
+                elif event == "started":
+                    with db(root) as conn:
+                        conn.execute("UPDATE jobs SET pid=? WHERE id=?", (details[0], job_id))
+                        if limit is not None:
+                            cutoff = details[1] + limit
+                            deadline = datetime.fromtimestamp(details[2] + limit, timezone.utc).isoformat(timespec="milliseconds")
+                            conn.execute("UPDATE jobs SET runtime_deadline=?,runtime_phase='executing' WHERE id=?",
+                                         (deadline, job_id))
+                elif event == "draining" and limit is not None:
+                    with db(root) as conn:
+                        conn.execute("UPDATE jobs SET runtime_phase='draining' WHERE id=?", (job_id,))
+                elif event == "launch_failed":
+                    finish(root, job_id, stopped or "launch_failed", note=details[0])
+                    return
+                elif event == "done":
+                    code = details[0]
+                    finish(root, job_id, stopped or ("succeeded" if code == 0 else "failed"), code)
+                    return
+            if released and stopped is None:
+                with db(root) as conn:
+                    requested = conn.execute(
+                        "SELECT kill_requested FROM jobs WHERE id=?", (job_id,)).fetchone()[0]
+                if requested or stop_requested():
+                    stopped = "killed"
+                elif cutoff is not None and time.monotonic() >= cutoff:
+                    stopped = "timed_out"
+                if stopped:
+                    job.cancel()
+    finally:
+        job.close()
+
+
+def run_job(root, row, *, base_env=None, validate_paths=False, stop_requested=lambda: False):
     row = dict(row)
     job_id = row["id"]
     # Commit running before spawn. If any uncertain failure follows spawning,
@@ -295,6 +358,7 @@ def run_job(root, row, *, base_env=None, validate_paths=False):
     internal_work, temp = directory / "work", directory / "tmp"
     cwd = Path(row["cwd"]) if row["cwd"] else internal_work
     proc, job = None, None
+    linux_supervision_started = False
     try:
         try:
             internal_work.mkdir(parents=True)
@@ -331,11 +395,16 @@ def run_job(root, row, *, base_env=None, validate_paths=False):
                         proc.wait()
                         proc = None
                         raise
+                elif sys.platform == "linux":
+                    # Once the supervisor exists, failures must preserve the
+                    # running row rather than silently releasing its queues.
+                    linux_supervision_started = True
+                    return _run_linux_job(root, row, argv, options, stop_requested)
                 else:
                     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
                                             start_new_session=True, **options)
         except (OSError, ValueError) as exc:
-            if proc is not None:
+            if proc is not None or linux_supervision_started:
                 raise
             finish(root, job_id, "launch_failed", note=str(exc))
             return
@@ -420,7 +489,7 @@ def worker(root, once, lane):
                         row = dict(row)
                         row.update(status="running", started=when)
                 if row:
-                    run_job(root, row)
+                    run_job(root, row, stop_requested=lambda: stop)
                 elif once:
                     return 0
                 else:
@@ -534,8 +603,8 @@ def main(prog=None):
                 raise ValueError("only a terminal job can be replayed")
         print(receipt)
     elif a.cmd == "kill":
-        if os.name != "nt":
-            raise ValueError("running-job kill requires Windows Job Objects; POSIX is test-only")
+        if os.name != "nt" and sys.platform != "linux":
+            raise ValueError("running-job kill requires Windows or Linux containment")
         row = dict(get_job(root, a.id))
         if row["status"] != "running" or "lane" not in row:
             raise ValueError("only an active job in a v2 queue may receive a kill request")

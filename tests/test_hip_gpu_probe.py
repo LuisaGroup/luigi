@@ -4,7 +4,7 @@ import struct
 import unittest
 import uuid
 
-from hip_gpu_probe import (
+from luigi_app.platforms.hip_probe import (
     Device, HipProbeError, HipUUID, _decode_child, _lexical_dll, _verify,
     enumerate_abi, format_luid, normalize_uuid, visibility_environment,
 )

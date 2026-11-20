@@ -76,6 +76,6 @@ arguments. Paste the link into a browser on the same computer and press Enter
 in the Luigi console when done. The broker's password never enters the page,
 URL fragment, browser process, or static assets.
 
-For Windows visual QA without live data, run python dashboard_fixture.py in a
+For Windows visual QA without live data, run python -m tests.dashboard_fixture in a
 local terminal; use healthy, held, or disconnected to switch the synthetic
 fixture in the same browser tab. Keep its temporary link local.

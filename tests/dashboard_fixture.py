@@ -3,7 +3,7 @@ import argparse
 from datetime import datetime, timedelta, timezone
 import sys
 
-from dashboard import open_dashboard
+from luigi_app.dashboard.server import open_dashboard
 
 
 def fixture_snapshot(mode):

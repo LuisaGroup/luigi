@@ -26,7 +26,7 @@ _REASONS = {
     "interrupted_job_needs_operator_review", "load_telemetry_unavailable",
     "worker_error", "gpu_binding_unavailable", "gpu_mapping_stale", "gpu_mapping_ambiguous",
     "reserved_by_a_running_job", "gpu_identity_unverified", "gpu_identity_stale", "gpu_identity_ambiguous",
-    "gpu_provider_not_configured", "gpu_telemetry_unavailable",
+    "gpu_provider_not_configured", "gpu_monitor_disabled", "gpu_telemetry_unavailable",
     "gpu_mask_verification_failed", "no_target_engine_sample", "invalid_percentage",
 }
 _STATUS = {"queued", "starting", "running", "cancelling", "succeeded", "failed", "killed",
@@ -153,7 +153,7 @@ class _Server(ThreadingHTTPServer):
         self.token = secrets.token_urlsafe(32)
         self.slots = threading.BoundedSemaphore(8)
         self.assets = {
-            route: (Path(__file__).with_name(filename).read_bytes(), content_type)
+            route: ((Path(__file__).parent / "assets" / filename).read_bytes(), content_type)
             for route, (filename, content_type) in _ASSETS.items()
         }
         super().__init__(("127.0.0.1", 0), _Handler)

@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from broker import Broker, decode, encode, MAX_FRAME, dispatcher, claim
+from luigi_app.core.broker import Broker, decode, encode, MAX_FRAME, dispatcher, claim
 
 TEST_PASSWORD = "local harness fake admin password"
 
@@ -71,7 +71,7 @@ class BrokerTests(unittest.TestCase):
         snapshot = (self.root / "backups" / backup_id / "snapshot.json").read_text()
         for secret in (a, b, TEST_PASSWORD):
             self.assertNotIn(secret, snapshot)
-        self.assertEqual(json.loads(snapshot)["queues"], [{"name":"gpu","kind":"gpu","gpu_uuid":None}])
+        self.assertEqual(json.loads(snapshot)["queues"], [{"name":"gpu","kind":"gpu","gpu_uuid":None,"gpu_provider":None}])
 
     def test_rotation_and_revocation(self):
         first = self.a["bearer"]
@@ -127,7 +127,7 @@ class BrokerTests(unittest.TestCase):
 
 
     def test_multiqueue_atomic_heads_reset_recover_replay_backup(self):
-        import gpufifo as fifo
+        import luigi_app.core.gpufifo as fifo
         a = self.a["bearer"]
         program = [str(Path(sys.executable).resolve()), "-c", "pass"]
         for name in ("cpu", "gpu", "aux"):
@@ -185,14 +185,14 @@ class BrokerTests(unittest.TestCase):
         self.assertIsNone(claim(self.broker, green, stop))
         self.assertEqual(self.yes("status", a, receipt=later)["holds"]["cpu"]["reason"],
                          "older job at queue head")
-        import gpufifo as fifo
+        import luigi_app.core.gpufifo as fifo
         fifo.finish(self.root, fifo.get_job(self.root, older)["id"], "succeeded")
         self.assertEqual(claim(self.broker, green, stop)["receipt"], joint)
         self.assertIsNone(claim(self.broker, green, stop))
 
     def test_concurrent_submissions_preserve_order_on_every_shared_queue(self):
         import concurrent.futures
-        import gpufifo as fifo
+        import luigi_app.core.gpufifo as fifo
         a = self.a["bearer"]
         program = [str(Path(sys.executable).resolve()), "-c", "pass"]
         names = ["red", "blue", "green"]
@@ -278,7 +278,7 @@ class BrokerTests(unittest.TestCase):
         doc = self.yes("snapshot", TEST_PASSWORD)
         self.assertEqual(doc["queues"][0]["queued"], 1)
         self.assertEqual(set(doc), {"queues","active","recent","telemetry"})
-        import gpufifo as fifo
+        import luigi_app.core.gpufifo as fifo
         row = claim(self.broker, lambda q: (True, "ready"), threading.Event())
         self.assertEqual(row["receipt"], receipt)
         doc = self.yes("snapshot", TEST_PASSWORD)
@@ -290,7 +290,7 @@ class BrokerTests(unittest.TestCase):
         fifo.finish(self.root, row["id"], "succeeded")
 
     def test_fake_server_never_receives_credential(self):
-        import transport
+        import luigi_app.platforms.transport as transport
         class Impostor:
             def __init__(self):
                 self.sent = []
@@ -309,7 +309,7 @@ class BrokerTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "win32", "Windows paths")
     def test_windows_rejects_remote_or_device_before_component_io(self):
         from unittest.mock import patch
-        import gpufifo as fifo
+        import luigi_app.core.gpufifo as fifo
         with patch.object(Path, "lstat", side_effect=AssertionError("did caller path I/O")):
             for path in (r"\\localhost\C$\windows\notepad.exe",
                          r"\\?\C:\windows\notepad.exe",
@@ -322,7 +322,7 @@ class BrokerTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "win32", "native Windows pipe required")
     def test_win_pipe_raw_json_admin_then_agent(self):
-        import transport
+        import luigi_app.platforms.transport as transport
         key = transport.identity(self.root, initialize=True)
         listener = transport.windows_listener(self.root)
         # One bounded request per connection; synthetic credentials only.

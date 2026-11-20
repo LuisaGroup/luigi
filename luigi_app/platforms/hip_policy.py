@@ -7,9 +7,9 @@ from pathlib import Path
 import threading
 import time
 
-import gpufifo as fifo
-from hip_gpu_probe import HipProbeError, trusted_local_dll, verify_device
-from luigi_loadguard import LoadGuard, WindowsGpu
+import luigi_app.core.gpufifo as fifo
+from luigi_app.platforms.hip_probe import HipProbeError, trusted_local_dll, verify_device
+from luigi_app.platforms.loadguard import LoadGuard, WindowsGpu
 
 
 def workload_environment():

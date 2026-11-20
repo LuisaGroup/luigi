@@ -4,9 +4,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from hip_gpu_probe import Device, HipProbeError, VerifiedDevice
-from hip_policy import DeferredLaunch, HipPolicy
-from luigi_loadguard import LoadGuard, Reading, Rule
+from luigi_app.platforms.hip_probe import Device, HipProbeError, VerifiedDevice
+from luigi_app.platforms.hip_policy import DeferredLaunch, HipPolicy
+from luigi_app.platforms.loadguard import LoadGuard, Reading, Rule
 
 UUID = "ab000000-0000-0000-0000-000000000001"
 LUID = "0x00000000_0x00000001"

@@ -3,7 +3,7 @@ import json
 import unittest
 from urllib.parse import urlsplit
 
-from dashboard import open_dashboard, sanitize
+from luigi_app.dashboard.server import open_dashboard, sanitize
 
 
 RECEIPT = "43215678-1234-4567-8765-123456789012"

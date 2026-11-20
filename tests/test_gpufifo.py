@@ -11,7 +11,7 @@ import time
 import unittest
 import uuid
 
-CLI = Path(__file__).resolve().with_name("gpufifo.py")
+CLI = Path(__file__).resolve().parents[1] / "luigi_app/core/gpufifo.py"
 
 
 class QueueTests(unittest.TestCase):
@@ -292,6 +292,10 @@ class QueueTests(unittest.TestCase):
         if os.name == "nt":
             self.assertEqual(gate_exited(5000), 0)
             self.assertFalse(done.exists())
+        elif sys.platform == "linux":
+            pid = self.status(job)["pid"]
+            self.until(lambda: not Path(f"/proc/{pid}").exists())
+            self.assertFalse(done.exists())
         else:
             release.touch()
             self.until(done.exists)
@@ -313,7 +317,8 @@ class QueueTests(unittest.TestCase):
         time.sleep(.15)
         gate.touch()
         self.assertEqual(p.wait(timeout=8), 0)
-        self.assertEqual(self.status(first)["status"], "succeeded")
+        self.assertEqual(self.status(first)["status"],
+                         "killed" if sys.platform == "linux" else "succeeded")
         self.assertEqual(self.status(second)["status"], "queued")
 
 

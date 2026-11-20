@@ -1,14 +1,17 @@
 # Luigi: local CPU and GPU job queues
 
-Windows-only local named pipe for the Luigi queue; CPython 3.10+ and no
+Local named pipes on Windows and Unix-domain sockets on Linux; CPython 3.10+ and no
 third-party dependency. **This
-is an API convention under one trusted Windows account, not a security
+is an API convention under one trusted OS account, not a security
 boundary.** Same-SID processes can bypass the CLI, access the spool, or read
 credential files. Do not deploy for mutually untrusted jobs or privileged
 work. No network listener, no elevation, no firewall/ACL/account changes.
 Direct SQLite tooling bundled for engine internals is not an agent interface.
 
 ## Setup and CLI
+
+For Linux, see [Linux setup](docs/linux.md). The examples below are for Windows.
+The optional [dashboard](docs/dashboard.md) is read-only on either platform.
 
 First run only in a fresh, private spool from a standard user's PowerShell:
 ```powershell
@@ -85,7 +88,7 @@ application-specific settings.
 
 ## Verify
 
-`& $python -m unittest -v` runs synthetic tests. Linux can run the direct
+`python -B -m unittest discover -s tests -t . -v` runs synthetic tests. Linux can run the direct
 policy/scheduler/guard tests without Windows; the native named-pipe test,
 owner kill enforcement, Win32 GPU telemetry and a smoke check on the target
 host are separate requirements. Luigi runs in the foreground only; it includes
@@ -152,3 +155,25 @@ waits. A task timeout terminates its own Windows Job Object, waits for its
 process tree to be empty, preserves logs, and reports `timed_out`. `draining`
 indicates the root exited while the contained job tree still has children.
 A stale or uncertain process tree continues holding its queues.
+
+## Monitoring and GPU binding by platform
+
+| Capability | Windows | Linux |
+| --- | --- | --- |
+| Local IPC | Authenticated named pipe | Same-UID authenticated Unix socket |
+| CPU admission | Windows system counters | Linux procfs |
+| Generic GPU admission | Windows WDDM counters | AMD amdgpu and opt-in NVIDIA counters; every detected PCI GPU must be covered |
+| Named AMD HIP UUID | Pinned AMD runtime and approved workloads | Not available; UUID-bound work stays held |
+| Named NVIDIA CUDA UUID | Optional pinned NVIDIA provider | Optional pinned NVIDIA provider |
+
+NVIDIA UUIDs are full physical `GPU-…` identifiers. See [NVIDIA setup and
+limits](docs/nvidia.md). Live device identity, load and fresh masked visibility
+must all be verified before a CUDA UUID launch; NVIDIA checks in the test
+suite are fixtures, not on-hardware results. CPU + one GPU may be requested
+together; mixed or multiple GPU requirements in one job are not supported.
+
+If GPU monitoring cannot work on this host and you intentionally accept
+overlap with outside GPU workloads, start with `serve --no-gpu-monitor`.
+The warning and dashboard show the opt-out, and the single generic GPU
+queue still follows FIFO and requires the CPU gate. UUID binding is disabled
+and spools already containing UUID queues are refused in this mode.
