@@ -1,0 +1,33 @@
+# Python and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+
+# Local spool, databases and task outputs
+LuigiBroker/
+spool/
+tasks/
+jobs/
+backups/
+samples/
+smoke/
+*.sqlite*
+*.db*
+*.log
+
+# Local credentials and configuration
+broker.identity
+.env
+.env.*
+secrets/
+credentials/
+*invite*.txt
+*token*.txt
+*password*.txt
+*.pem
+*.key
+
+LuigiMultiQueue/

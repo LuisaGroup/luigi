@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Luigi · Local dashboard</title>
+  <link rel="stylesheet" href="/dashboard.css">
+  <script src="/dashboard.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="page-head">
+      <div>
+        <p class="eyebrow">LOCAL · READ ONLY</p>
+        <h1>Luigi dashboard</h1>
+        <p class="intro">Queue progress and machine availability.</p>
+      </div>
+      <div class="connection">
+        <p id="connection" class="badge pending" role="status">Waiting for session</p>
+        <button id="refresh" type="button" disabled>Refresh</button>
+      </div>
+    </header>
+    <p id="observation" class="observation">No snapshot loaded.</p>
+    <section aria-labelledby="queue-title">
+      <div class="section-head"><h2 id="queue-title">Queues</h2><span>Pending · Active · Held</span></div>
+      <div class="grid" id="queues"><p class="empty">Queue counts will appear here.</p></div>
+    </section>
+    <section aria-labelledby="usage-title">
+      <div class="section-head"><h2 id="usage-title">Machine load</h2><span>Most recent observations</span></div>
+      <div class="grid" id="telemetry"><p class="empty">No measurements yet.</p></div>
+    </section>
+    <div class="job-sections">
+      <section aria-labelledby="active-title">
+        <h2 id="active-title">Active jobs</h2>
+        <div id="active"><p class="empty">No snapshot loaded.</p></div>
+      </section>
+      <section aria-labelledby="recent-title">
+        <h2 id="recent-title">Recent results</h2>
+        <div id="recent"><p class="empty">No snapshot loaded.</p></div>
+      </section>
+    </div>
+    <footer>Refreshes every 5 seconds. Closing the local launcher ends the session.</footer>
+  </main>
+</body>
+</html>
