@@ -437,7 +437,7 @@ def _configurations(db):
     return {r["name"]: r for r in queue_rows(db)}
 
 
-def claim(broker, prelaunch, stop):
+def claim(broker, prelaunch, stop, drain=None):
     """One allocation transaction. prelaunch must only read cached telemetry."""
     with broker.claim_lock:
         with broker.auth._db(tx=True) as db:
@@ -459,7 +459,7 @@ def claim(broker, prelaunch, stop):
                 holds[name] = {"allowed": bool(allowed), "reason": str(reason)[:512]}
             with broker.hold_lock:
                 broker.holds = holds
-            if stop.is_set():
+            if stop.is_set() or (drain is not None and drain.is_set()):
                 return None
             for candidate in db.execute(_ELIGIBLE):
                 names = memberships(db, candidate["id"])
@@ -476,7 +476,7 @@ def claim(broker, prelaunch, stop):
         return row | {"_hip_binding": binding}
 
 
-def dispatcher(broker, stop, prelaunch, execute=None):
+def dispatcher(broker, stop, prelaunch, execute=None, *, drain=None, ready=None):
     """Only one dispatcher serves this spool. Running jobs drain on stop."""
     if execute is None:
         def execute(row):
@@ -514,13 +514,15 @@ def dispatcher(broker, stop, prelaunch, execute=None):
 
     workers = set()
     with fifo.worker_lock(broker.root, "dispatcher"):
+        if ready is not None:
+            ready.set()
         try:
             while not stop.is_set():
                 workers = {t for t in workers if t.is_alive()}
                 if len(workers) >= 16:
                     stop.wait(.25)
                     continue
-                row = claim(broker, prelaunch, stop)
+                row = claim(broker, prelaunch, stop, drain)
                 if row is None:
                     stop.wait(.25)
                     continue

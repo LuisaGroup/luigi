@@ -24,18 +24,7 @@ def default_root():
     return Path(os.environ["LOCALAPPDATA"]) / "LuigiMultiQueue"
 
 
-def serve(root, adapter, *, hip_dll=None, hip_workload=(), nvidia_smi=None, cuda_driver=None, cuda_workload=(), no_gpu_monitor=False, prelaunch=None, stop=None):
-    """Explicit foreground run under non-elevated user; no service/registry code."""
-    import luigi_app.core.gpufifo as fifo
-    transport.require_non_elevated()
-    root = transport.private_root(root)
-    stop = stop if stop is not None else threading.Event()
-    broker = Broker(root)
-    with broker.auth._db() as db:
-        if not db.execute("SELECT 1 FROM admin WHERE id=1").fetchone():
-            raise ValueError("run the interactive bootstrap command first")
-    key = transport.identity(root)
-    sampler = None
+def configure_policy(broker, adapter, *, hip_dll=None, hip_workload=(), nvidia_smi=None, cuda_driver=None, cuda_workload=(), no_gpu_monitor=False, prelaunch=None):
     if prelaunch is None:
         if no_gpu_monitor:
             from luigi_app.platforms.linux_policy import NoGpuMonitorPolicy
@@ -75,10 +64,28 @@ def serve(root, adapter, *, hip_dll=None, hip_workload=(), nvidia_smi=None, cuda
         if not no_gpu_monitor:
             from luigi_app.platforms.gpu_routing import RoutedPolicy
             broker.policy = RoutedPolicy(broker.policy, nvidia)
-        sampler = threading.Thread(target=broker.policy.observe, args=(broker, stop), daemon=True)
         policy = broker.policy.decision
     else:
         policy = prelaunch
+    return policy
+
+
+def serve(root, adapter, *, hip_dll=None, hip_workload=(), nvidia_smi=None, cuda_driver=None, cuda_workload=(), no_gpu_monitor=False, prelaunch=None, stop=None):
+    """Explicit foreground run under non-elevated user; no service/registry code."""
+    import luigi_app.core.gpufifo as fifo
+    transport.require_non_elevated()
+    root = transport.private_root(root)
+    stop = stop if stop is not None else threading.Event()
+    broker = Broker(root)
+    with broker.auth._db() as db:
+        if not db.execute("SELECT 1 FROM admin WHERE id=1").fetchone():
+            raise ValueError("run the interactive bootstrap command first")
+    key = transport.identity(root)
+    policy = configure_policy(broker, adapter, hip_dll=hip_dll, hip_workload=hip_workload,
+                              nvidia_smi=nvidia_smi, cuda_driver=cuda_driver, cuda_workload=cuda_workload,
+                              no_gpu_monitor=no_gpu_monitor, prelaunch=prelaunch)
+    sampler = (threading.Thread(target=broker.policy.observe, args=(broker, stop), daemon=True)
+               if broker.policy is not None else None)
     with fifo.worker_lock(root, "broker"):
         listener = transport.listener(root)
         worker = threading.Thread(target=dispatcher, args=(broker, stop, policy))
@@ -181,6 +188,19 @@ def parse():
             a.add_argument("--gpu-provider", choices=("amd","nvidia"))
     s.add_parser("queues")
     s.add_parser("dashboard", help="private local read-only queue dashboard (admin)")
+    sup = s.add_parser("supervise", help="serve through stable local hot-update supervisor")
+    sup.add_argument("--gpu-adapter", default="all", help="Windows adapter LUID or all; Linux only supports all")
+    sup.add_argument("--no-gpu-monitor", action="store_true", help="explicitly allow generic GPU jobs without GPU telemetry (CPU gate applies)")
+    sup.add_argument("--hip-dll", help="trusted physical path to the pinned AMD HIP runtime")
+    sup.add_argument("--hip-workload", action="append", default=[], help="trusted physical executable; repeat to approve more")
+    sup.add_argument("--nvidia-smi", help="trusted absolute nvidia-smi path")
+    sup.add_argument("--cuda-driver", help="trusted absolute CUDA driver library path")
+    sup.add_argument("--cuda-workload", action="append", default=[], help="trusted physical CUDA executable; repeat to approve more")
+    upd = s.add_parser("hot-update", help="stage a trusted local release ZIP and drain into it (admin)")
+    upd.add_argument("archive", type=Path)
+    upd.add_argument("--sha256", required=True)
+    upd.add_argument("--drain-timeout", type=int, default=3600)
+    s.add_parser("hot-update-status", help="show the active release and update phase (admin)")
     s.add_parser("backup")
     a = s.add_parser("revoke")
     a.add_argument("agent")
@@ -269,6 +289,21 @@ def main():
 
     if a.op == "dashboard":
         return run_dashboard(root)
+    if a.op == "supervise":
+        from luigi_app.hotupdate.supervisor import serve_supervised
+        return serve_supervised(root, a.gpu_adapter,
+                                hip_dll=str(a.hip_dll) if a.hip_dll is not None else None,
+                                hip_workload=[str(p) for p in a.hip_workload],
+                                nvidia_smi=str(a.nvidia_smi) if a.nvidia_smi is not None else None,
+                                cuda_driver=str(a.cuda_driver) if a.cuda_driver is not None else None,
+                                cuda_workload=[str(p) for p in a.cuda_workload],
+                                no_gpu_monitor=a.no_gpu_monitor)
+    if a.op in {"hot-update", "hot-update-status"}:
+        password = read_tty("Luigi admin password: ")
+        data = ({"archive": str(a.archive.absolute()), "sha256": a.sha256, "drain_timeout": a.drain_timeout}
+                if a.op == "hot-update" else {})
+        print(json.dumps(request(root, a.op, password, **data), ensure_ascii=True))
+        return 0
 
     if a.op in {"create", "reset", "queues", "backup", "revoke", "recover", "invite"}:
         cred = read_tty("Luigi admin password: ")

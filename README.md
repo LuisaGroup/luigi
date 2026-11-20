@@ -168,3 +168,7 @@ from the checkout. The [CI workflow](.github/workflows/ci.yml) covers Ubuntu
 and Windows on Python 3.10 and 3.13 and requires the corresponding native IPC
 tests to pass. Tests do not need GPU hardware. To check the dashboard
 JavaScript separately, run `node --check luigi_app/dashboard/assets/dashboard.js`.
+
+## Worker hot updates
+
+See [in-place worker updates](docs/hot-update.md) to drain and switch versions without changing the client endpoint.
