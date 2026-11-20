@@ -1,179 +1,170 @@
 # Luigi: local CPU and GPU job queues
 
-Local named pipes on Windows and Unix-domain sockets on Linux; CPython 3.10+ and no
-third-party dependency. **This
-is an API convention under one trusted OS account, not a security
-boundary.** Same-SID processes can bypass the CLI, access the spool, or read
-credential files. Do not deploy for mutually untrusted jobs or privileged
-work. No network listener, no elevation, no firewall/ACL/account changes.
-Direct SQLite tooling bundled for engine internals is not an agent interface.
+Luigi schedules local work on **Windows and Linux**, with named FIFO queues,
+per-job timeouts, and an optional [read-only dashboard](docs/dashboard.md).
+Use CPython 3.10 or newer; there are no third-party Python dependencies.
 
-## Setup and CLI
+Run Luigi as a regular user, not as Windows Administrator or Linux root.
+The broker uses a local Windows named pipe or a Unix-domain socket on Linux.
+Application roles assume one trusted OS account: same-account processes can
+access the spool or bypass the CLI. Luigi is not a sandbox for untrusted
+programs. It does not install a service, change system permissions, or expose
+the broker over TCP.
 
-For Linux, see [Linux setup](docs/linux.md). The examples below are for Windows.
-The optional [dashboard](docs/dashboard.md) is read-only on either platform.
+## Quick start
 
-First run only in a fresh, private spool from a standard user's PowerShell:
+Open two terminals in the repository checkout. Run `bootstrap` only once for
+a fresh spool. It prompts for an administrator password without echo. Leave
+`serve` open in the first terminal.
+
+### Linux (sh / Bash)
+
+**Terminal 1: start the broker**
+
+```sh
+python3 luigi.py bootstrap
+python3 luigi.py serve
+```
+
+**Terminal 2: submit and inspect a CPU job**
+
+```sh
+python3 luigi.py create cpu
+private_dir=$(mktemp -d "$HOME/.luigi-client.XXXXXX")
+python3 luigi.py invite --out "$private_dir/invite"
+python3 luigi.py enroll --invite-file "$private_dir/invite" --out "$private_dir/token"
+job_python=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.executable).resolve())')
+receipt=$(python3 luigi.py submit --token-file "$private_dir/token" --queue cpu --timeout 120 -- "$job_python" -c 'print(101)')
+python3 luigi.py status --token-file "$private_dir/token" "$receipt"
+python3 luigi.py wait --token-file "$private_dir/token" "$receipt" --timeout 60
+python3 luigi.py log --token-file "$private_dir/token" "$receipt" --stream stdout
+```
+
+The default spool is `$XDG_STATE_HOME/luigi`, or `~/.local/state/luigi` when
+`XDG_STATE_HOME` is unset. Keep the spool private (mode 0700) and use a
+physical, nonsymlink path if specifying `--root`. See [Linux setup](docs/linux.md).
+
+### Windows (PowerShell)
+
+**Terminal 1: start the broker**
+
 ```powershell
 $python = (Get-Command python.exe -ErrorAction Stop).Source
 & $python .\luigi.py bootstrap
-& $python .\luigi.py serve --gpu-adapter all
+& $python .\luigi.py serve
 ```
-Bootstrap asks for the new password twice without echo. Keep this PowerShell
-open for the foreground broker; Ctrl+C stops intake and waits for active jobs.
-Use an interactive PowerShell (not redirection, chat, or command arguments)
-for every password prompt. Keep the default identity and spool files under
-private LocalAppData; clients verify the broker's HMAC challenge before
-sending any credentials. This protects against a local pipe squatter without
-the identity file, not deliberate access by a trusted same-SID process.
 
-`all` conservatively gates on the busiest visible GPU engine across adapters;
-use an explicit actual adapter LUID only when known. Verify native Windows load
-telemetry before production jobs.
-On failure or missing telemetry, queued jobs remain held rather than starting.
-The broker does not interrupt jobs already running when CPU/GPU load changes.
-CPU and GPU workers are independent and enforce one active job per lane;
-submitting a GPU workload to the CPU lane is outside the contract.
+**Terminal 2: submit and inspect a CPU job**
 
-From another PowerShell (set `$python` in each window):
 ```powershell
+$python = (Get-Command python.exe -ErrorAction Stop).Source
 & $python .\luigi.py create cpu
-& $python .\luigi.py create gpu
-& $python .\luigi.py queues
-& $python .\luigi.py invite --out $privateInviteFile
-& $python .\luigi.py enroll --invite-file $privateInviteFile --out $privateTokenFile
+$privateDir = Join-Path $env:LOCALAPPDATA ("LuigiClient-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $privateDir -ErrorAction Stop | Out-Null
+$invite = Join-Path $privateDir "invite"
+$token = Join-Path $privateDir "token"
+& $python .\luigi.py invite --out $invite
+& $python .\luigi.py enroll --invite-file $invite --out $token
 $jobPython = & $python -c 'from pathlib import Path; import sys; print(Path(sys.executable).resolve())'
-$receipt = & $python .\luigi.py submit --token-file $privateTokenFile --queue cpu -- $jobPython -c 'print(101)'
-& $python .\luigi.py status --token-file $privateTokenFile $receipt
-& $python .\luigi.py wait --token-file $privateTokenFile $receipt --timeout 60
-& $python .\luigi.py log --token-file $privateTokenFile $receipt --stream stdout
-```
-The two file variables must be **fresh paths in the operator's private local
-profile**, not Git, shared files, env, tool transcript, or job inputs.
-Admin operations prompt for the password without echo. The app stores
-scrypt admin verifier and hashed invitations and bearers. Invitation TTL
-defaults to five minutes and redemption is single-use. Agent token TTL is
-seven days; use `rotate --token-file ... --out ...` before expiry and share
-only the agent's bearer file with that agent. Admin `revoke AGENT_ID` ends
-that agent's future API access, not its current running jobs. Never include
-enrollment secrets or a password in a command's arguments or workload output.
-No credentials are injected into job environments; the broker copies a narrow
-allowlist of runtime variables, so use an explicit workload wrapper for
-application-specific settings.
-
-- Admin only: create/reset lanes, list queue summaries, invite, revoke, recover
-  an interrupted lane, make fixed-location metadata/log backups. Reset
-  cancels only pending jobs; it does not terminate running jobs. Backup
-  excludes auth verifier/tokens and execution scratch, requires both lanes
-  quiescent, and is inspection/export only with no restore command.
-- Agent only: submit to an admin-created lane, list own, read/wait/log own,
-  cancel own queued, kill own running Windows Job Object tree, and replay own
-  terminal job to a fresh receipt. The original lane is preserved. Admin
-  password is not an implicit cross-owner kill permission. `status` embeds
-  hold reason for queued work; inspect the result as JSON.
-- Jobs default to their own work and temporary directories and separate stdout
-  and stderr. `submit --cwd C:\path` preserves an existing work directory.
-  Use absolute executable and input paths. App-managed caches are separate:
-  applications may store caches beside the executable, independently of CWD
-  or TMP. Use separate application cache roots for isolated cold benchmarks.
-- Luigi cannot preempt unmanaged work or detect which application owns the GPU.
-  Processes started outside the queue are never adopted. Synthetic tests require
-  no GPU.
-- Stop from the foreground console with Ctrl+C to drain the active jobs then
-  stop, leaving pending work queued. After a crash verify descendants are
-  gone, then use `recover UUID --confirmed-stopped` as admin, no auto replay.
-- Named pipe uses local-only Win32 pipe mode and bounded byte/JSON framing,
-  not pickle and not TCP. Same-SID callers can spoof a pipe or edit files as
-  described above; app authorization cannot prevent it.
-
-## Verify
-
-`python -B -m unittest discover -s tests -t . -v` runs synthetic tests. Linux can run the direct
-policy/scheduler/guard tests without Windows; the native named-pipe test,
-owner kill enforcement, Win32 GPU telemetry and a smoke check on the target
-host are separate requirements. Luigi runs in the foreground only; it includes
-no service, startup entry, or scheduled task. Pending receipts persist when
-the terminal closes, but processing requires a new foreground session. Do not
-hand it live GPU work until
-native smoke tests and sensor behavior are verified.
-
-Job executable and explicit cwd must be physical absolute local drive paths.
-UNC, device paths, mapped network drives, and reparse points (including
-package-manager aliases or junctions) are rejected. Resolve trusted local installation
-paths yourself before submitting, as shown above; the broker never follows them.
-
-## Named queues and runtime limits (successor)
-
-This uses a new spool, `%LOCALAPPDATA%\LuigiMultiQueue`; pilot spools are
-not migrated. `create cpu` and `create gpu` retain their original default
-kinds. Other names require `create NAME --kind cpu|gpu`; names contain a
-lowercase letter followed by up to 31 lowercase letters, digits or hyphens.
-For example:
-
-```powershell
-& $python .\luigi.py create build --kind cpu
-$receipt = & $python .\luigi.py submit --token-file $privateTokenFile --queue build --queue gpu --timeout 120 -- $jobPython -c 'print(101)'
+$receipt = & $python .\luigi.py submit --token-file $token --queue cpu --timeout 120 -- $jobPython -c 'print(101)'
+& $python .\luigi.py status --token-file $token $receipt
+& $python .\luigi.py wait --token-file $token $receipt --timeout 60
+& $python .\luigi.py log --token-file $token $receipt --stream stdout
 ```
 
-Repeat `--queue` to request up to 16 distinct named queues. Omitting it still
-requests `gpu`. A job starts only at the head of every requested queue,
-with every requested queue free and its load gate open. A job waiting at
-the head of one queue blocks later jobs on that queue, even if it is also
-waiting on another queue. Unrelated queues can progress. No reservations
-are taken until all requirements can be granted together. Resetting any
-one queue cancels pending jobs that requested it, clearing those jobs
-from all requested queues. Replay preserves the requested queues; an
-interrupted job continues holding all of them pending verified recovery.
+The default spool is `%LOCALAPPDATA%\LuigiMultiQueue`. Legacy pilot spools
+are not migrated. Submitted executables and explicit working directories
+must be physical absolute local paths; UNC paths, mapped drives, and
+reparse points (including junctions) are rejected.
 
-`create NAME --kind gpu --gpu-uuid UUID` records a stable, nonzero UUID.
-Windows AMD HIP binding is opt-in at broker startup, with an operator-selected
-`--hip-dll` absolute local runtime path and one or more `--hip-workload`
-absolute local executable paths. Pin an app-local, byte-identical copy of
-the runtime alongside each approved executable. An existing mismatched or
-ambiguous app-local runtime is rejected. Only approve trusted applications
-that load that app-local runtime and honor HIP device visibility. This is
-cooperative admission, not an OS restriction, and does not isolate CUDA,
-DirectX, Vulkan, or programs that override the environment.
+On either platform, run `python3 luigi.py dashboard` (Linux) or
+`python .\luigi.py dashboard` (Windows) while the broker is running. Enter
+the admin password at the hidden prompt and open the printed private
+link in a same-machine browser. Do not share or forward the link.
 
-The broker periodically verifies the stable HIP UUID, live ordinal, WDDM LUID
-and node mask in fresh processes, then samples only the matching adapter's
-WDDM headroom. Before launch it independently checks the actual app-local
-runtime and verifies a clean masked child can see only the expected UUID at
-ordinal zero. Stale, uncertain or unavailable data keeps jobs queued without
-starting their timeout. No fallback to a numeric device setting or aggregate
-GPU utilization is used for UUID-bound queues. Duplicate UUIDs are rejected,
-as is mixing an unbound GPU queue with a UUID-bound queue, or requesting
-multiple GPU queues in one job. Native test coverage and compatibility depend
-on the installed AMD runtime exporting the UUID and LUID operations; no native
-HIP workload is started as part of synthetic tests.
+## Queue and job behavior
 
-The runtime timeout is 1800 seconds by default, configurable through
-`submit --timeout SECONDS` (integer between 1 and 86400). It starts when
-the contained Windows child is released, not when queued or load-held.
-This differs from `wait --timeout`, which only limits how long the client
-waits. A task timeout terminates its own Windows Job Object, waits for its
-process tree to be empty, preserves logs, and reports `timed_out`. `draining`
-indicates the root exited while the contained job tree still has children.
-A stale or uncertain process tree continues holding its queues.
+- The quick start creates a CPU queue only. `create gpu` creates the default
+  generic GPU queue; `create NAME --kind cpu|gpu` creates other named queues.
+  Names start with a lowercase letter and contain up to 32 lowercase letters,
+  digits or hyphens. Always specify `--queue cpu` for CPU-only submissions;
+  omitting `--queue` selects `gpu`.
+- Repeat `--queue` to request up to 16 distinct queues, for example
+  `--queue cpu --queue gpu`. A job starts only when it is first in every
+  requested queue and each queue is free and passes its load check. Queues
+  are acquired together. Earlier jobs waiting on one queue block later
+  jobs on that queue; unrelated queues can proceed. A job can use at most
+  one GPU queue.
+- `submit --timeout` is the runtime limit (default 1800 seconds, allowed
+  1–86400); it starts at launch, not while queued. `wait --timeout` only
+  limits the client's wait. A timed-out job keeps its logs. Windows uses
+  Job Objects; Linux uses process groups and a subreaper. `draining` means
+  the root exited but tracked children still hold the queues. On Linux,
+  deliberately escaping the process group is not supported; see
+  [Linux job lifecycle](docs/linux.md#job-lifecycle).
+- Stop the foreground broker with Ctrl+C. Windows drains active jobs; Linux
+  cancels active contained groups. Pending jobs persist. After an abrupt
+  stop, verify all relevant work has stopped before using the admin
+  `recover RECEIPT --confirmed-stopped` command; there is no auto-replay.
+- Jobs have private work/temp directories and separate stdout/stderr.
+  Use absolute executable and input paths; `submit --cwd` selects an existing
+  working directory. Applications may store caches beside the executable
+  independently of CWD and TMP. Use separate application cache roots for
+  isolated benchmarks.
 
-## Monitoring and GPU binding by platform
+An admin can create, inspect, or reset queues, issue invitations, revoke
+agents, recover interrupted jobs, and export metadata/log backups. A reset
+cancels pending work, not active jobs. Backups require quiescent queues and
+exclude credentials and execution scratch. An agent can submit, list,
+inspect, wait, read logs, cancel, kill, or replay its own jobs using its
+token; a replay gets a new receipt. Admin authentication does not implicitly
+authorize killing another owner's job.
+
+Keep invitations and tokens in fresh files in a private local directory;
+never put them in Git, command arguments, workload output, or chat. An
+invitation expires after five minutes by default and can be used only once.
+Agent tokens expire after seven days; use `rotate --token-file ... --out ...`
+before expiry. Job environments receive no Luigi credentials and only a
+narrow allowlist of runtime variables.
+
+## GPU support
 
 | Capability | Windows | Linux |
 | --- | --- | --- |
-| Local IPC | Authenticated named pipe | Same-UID authenticated Unix socket |
-| CPU admission | Windows system counters | Linux procfs |
-| Generic GPU admission | Windows WDDM counters | AMD amdgpu and opt-in NVIDIA counters; every detected PCI GPU must be covered |
-| Named AMD HIP UUID | Pinned AMD runtime and approved workloads | Not available; UUID-bound work stays held |
-| Named NVIDIA CUDA UUID | Optional pinned NVIDIA provider | Optional pinned NVIDIA provider |
+| Generic GPU load guard | WDDM counters | AMD amdgpu sysfs and opt-in NVIDIA telemetry; every detected PCI GPU must be covered |
+| AMD HIP UUID binding | Optional pinned app-local HIP runtime and allowlisted executable | Not available; UUID-bound AMD jobs do not launch |
+| NVIDIA CUDA UUID binding | Optional pinned NVIDIA provider | Optional pinned NVIDIA provider |
 
-NVIDIA UUIDs are full physical `GPU-…` identifiers. See [NVIDIA setup and
-limits](docs/nvidia.md). Live device identity, load and fresh masked visibility
-must all be verified before a CUDA UUID launch; NVIDIA checks in the test
-suite are fixtures, not on-hardware results. CPU + one GPU may be requested
-together; mixed or multiple GPU requirements in one job are not supported.
+By default, missing or stale GPU telemetry holds GPU work. Luigi does not
+preempt external work or interrupt running jobs when load rises. Windows
+supports `serve --gpu-adapter all` (the default) or a known adapter LUID for
+generic monitoring. Linux supports only `all`.
 
-If GPU monitoring cannot work on this host and you intentionally accept
-overlap with outside GPU workloads, start with `serve --no-gpu-monitor`.
-The warning and dashboard show the opt-out, and the single generic GPU
-queue still follows FIFO and requires the CPU gate. UUID binding is disabled
-and spools already containing UUID queues are refused in this mode.
+If you deliberately accept overlap with outside GPU jobs, start the broker
+with `serve --no-gpu-monitor`. One generic GPU queue still runs serially in
+FIFO order and the CPU load check still applies. This disables UUID binding
+and refuses a spool containing UUID-bound queues; it never activates
+automatically.
+
+- **AMD on Windows:** opt in with an absolute physical `--hip-dll` and
+  repeatable `--hip-workload` paths at startup. Each approved HIP executable
+  must ship a byte-identical app-local runtime. Luigi verifies the hardware
+  UUID, WDDM load, and masked visibility before launch.
+- **NVIDIA on either platform:** see [NVIDIA setup](docs/nvidia.md).
+  Configure `--nvidia-smi`, `--cuda-driver` and repeatable `--cuda-workload`
+  paths for UUID-bound execution. Use the full physical `GPU-…` UUID and
+  `create NAME --kind gpu --gpu-provider nvidia --gpu-uuid UUID`. NVIDIA
+  automated coverage uses fixtures, not a real GPU.
+
+Generic and UUID-bound queues cannot share a spool. Duplicate GPU UUIDs
+are rejected. UUID routing applies only to trusted workloads that honor the
+HIP or CUDA selector; it is not hardware isolation and does not bind
+DirectX, Vulkan, or other APIs.
+
+## Development
+
+Run `python3 -B -m tests.ci` on Linux or `python -B -m tests.ci` on Windows
+from the checkout. The [CI workflow](.github/workflows/ci.yml) covers Ubuntu
+and Windows on Python 3.10 and 3.13 and requires the corresponding native IPC
+tests to pass. Tests do not need GPU hardware. To check the dashboard
+JavaScript separately, run `node --check luigi_app/dashboard/assets/dashboard.js`.
